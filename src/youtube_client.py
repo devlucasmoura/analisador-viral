@@ -25,6 +25,15 @@ class VideoData:
 
 
 @dataclass
+class CommentData:
+    author: str
+    text: str
+    likes: int
+    published_at: datetime
+    reply_count: int
+
+
+@dataclass
 class ChannelData:
     channel_id: str
     title: str
@@ -132,16 +141,25 @@ class YouTubeClient:
         return items[0]
 
     def _fetch_recent_video_ids(self, uploads_playlist: str, max_videos: int) -> list[str]:
+        # Buscamos mais itens do que precisamos porque a playlist "uploads" nem sempre
+        # devolve em ordem estritamente cronológica (shorts, republicações, etc).
+        fetch_size = min(max(max_videos * 3, 15), 50)
         try:
             response = self._service.playlistItems().list(
-                part="contentDetails",
+                part="contentDetails,snippet",
                 playlistId=uploads_playlist,
-                maxResults=max_videos,
+                maxResults=fetch_size,
             ).execute()
         except HttpError as exc:
             raise YouTubeError(self._friendly_error(exc)) from exc
 
-        return [item["contentDetails"]["videoId"] for item in response.get("items", [])]
+        items = response.get("items", [])
+        items.sort(
+            key=lambda it: it["contentDetails"].get("videoPublishedAt")
+            or it["snippet"].get("publishedAt", ""),
+            reverse=True,
+        )
+        return [it["contentDetails"]["videoId"] for it in items[:max_videos]]
 
     def _fetch_videos(self, video_ids: list[str]) -> list[VideoData]:
         if not video_ids:
@@ -182,7 +200,44 @@ class YouTubeClient:
                 tags=snippet.get("tags", []),
                 description=snippet.get("description", ""),
             ))
+
+        # videos.list não garante a ordem dos IDs pedidos — ordenamos por data DESC.
+        videos.sort(key=lambda v: v.published_at, reverse=True)
         return videos
+
+    def fetch_top_comments(self, video_id: str, max_comments: int = 30) -> list[CommentData]:
+        """Busca até `max_comments` comentários de topo do vídeo, ordenados por relevância.
+
+        Retorna lista vazia se os comentários estiverem desativados no vídeo.
+        """
+        try:
+            response = self._service.commentThreads().list(
+                part="snippet",
+                videoId=video_id,
+                maxResults=min(max_comments, 100),
+                order="relevance",
+                textFormat="plainText",
+            ).execute()
+        except HttpError as exc:
+            # 403 aqui geralmente significa "comentários desativados" — não é erro fatal.
+            status = exc.resp.status if exc.resp else 0
+            if status == 403:
+                return []
+            raise YouTubeError(self._friendly_error(exc)) from exc
+
+        comments: list[CommentData] = []
+        for item in response.get("items", []):
+            top = item["snippet"]["topLevelComment"]["snippet"]
+            comments.append(CommentData(
+                author=top.get("authorDisplayName", ""),
+                text=top.get("textDisplay", ""),
+                likes=int(top.get("likeCount", 0)),
+                published_at=datetime.fromisoformat(
+                    top["publishedAt"].replace("Z", "+00:00")
+                ),
+                reply_count=int(item["snippet"].get("totalReplyCount", 0)),
+            ))
+        return comments
 
     @staticmethod
     def _friendly_error(exc: HttpError) -> str:

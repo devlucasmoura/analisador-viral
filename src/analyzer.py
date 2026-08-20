@@ -3,7 +3,8 @@ import statistics
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from .youtube_client import ChannelData, VideoData
+from .comment_analyzer import CommentInsights, analyze_comments
+from .youtube_client import ChannelData, CommentData, VideoData
 
 
 TRIGGER_WORDS = {
@@ -23,6 +24,7 @@ class VideoAnalysis:
     engagement_rate: float  # likes / views %
     is_viral: bool
     rank: int
+    comment_insights: CommentInsights = field(default_factory=CommentInsights)
 
 
 @dataclass
@@ -46,7 +48,10 @@ class ChannelAnalysis:
         return [v for v in self.videos if v.is_viral]
 
 
-def analyze_channel(channel: ChannelData) -> ChannelAnalysis:
+def analyze_channel(
+    channel: ChannelData,
+    comments_by_video: dict[str, list[CommentData]] | None = None,
+) -> ChannelAnalysis:
     if not channel.videos:
         return ChannelAnalysis(
             channel=channel,
@@ -61,17 +66,20 @@ def analyze_channel(channel: ChannelData) -> ChannelAnalysis:
     videos = channel.videos
     views_list = [v.views for v in videos]
     median_views = int(statistics.median(views_list)) or 1
+    comments_by_video = comments_by_video or {}
 
     analyses: list[VideoAnalysis] = []
     for v in videos:
         engagement = (v.likes / v.views * 100) if v.views else 0
         viral_score = v.views / median_views
+        insights = analyze_comments(comments_by_video.get(v.video_id, []))
         analyses.append(VideoAnalysis(
             video=v,
             viral_score=viral_score,
             engagement_rate=engagement,
             is_viral=viral_score >= 2.0,
             rank=0,
+            comment_insights=insights,
         ))
 
     analyses.sort(key=lambda a: a.viral_score, reverse=True)
@@ -84,6 +92,7 @@ def analyze_channel(channel: ChannelData) -> ChannelAnalysis:
 
     top = analyses[0]
     reasons = _diagnose_viral(top, avg_duration, avg_title_length, avg_engagement, median_views)
+    _enrich_reasons_with_comments(reasons, top)
 
     return ChannelAnalysis(
         channel=channel,
@@ -182,6 +191,32 @@ def _diagnose_viral(
     ).replace(",", ".")
 
     return ViralReasons(factors=factors, summary=summary)
+
+
+def _enrich_reasons_with_comments(reasons: ViralReasons, top: VideoAnalysis) -> None:
+    insights = top.comment_insights
+    if not insights.has_data:
+        return
+
+    if insights.top_keywords:
+        keywords = ", ".join(f"{w} ({n})" for w, n in insights.top_keywords[:5])
+        reasons.factors.append(f"Público comenta muito: {keywords}")
+
+    sentiment_label = {
+        "positivo": "reação predominantemente positiva",
+        "negativo": "reação predominantemente negativa",
+        "misto": "reação dividida",
+        "neutro": "reação neutra",
+    }.get(insights.sentiment, insights.sentiment)
+    reasons.factors.append(
+        f"Análise de {insights.total_analyzed} comentários: {sentiment_label} "
+        f"({insights.positive_score} sinais positivos, {insights.negative_score} negativos)"
+    )
+
+    if insights.requests:
+        reasons.factors.append(
+            f"Público pediu {len(insights.requests)} vez(es) por continuação/temas — ver aba de sugestões"
+        )
 
 
 def _fmt_duration(seconds: int) -> str:

@@ -189,7 +189,15 @@ class MainScreen(ctk.CTkFrame):
             api_key = config.load_api_key()
             client = YouTubeClient(api_key)
             channel = client.analyze_channel(url, max_videos=10)
-            analysis = analyze_channel(channel)
+
+            self.after(0, lambda: self.status_label.configure(
+                text=f"Buscando comentários dos {len(channel.videos)} vídeos..."
+            ))
+            comments_by_video: dict[str, list] = {}
+            for v in channel.videos:
+                comments_by_video[v.video_id] = client.fetch_top_comments(v.video_id, max_comments=30)
+
+            analysis = analyze_channel(channel, comments_by_video=comments_by_video)
             self.after(0, lambda: self._render_results(analysis))
         except YouTubeError as e:
             self.after(0, lambda: self._show_error(str(e)))
@@ -261,9 +269,20 @@ class MainScreen(ctk.CTkFrame):
                 ).pack(anchor="w", padx=12, pady=2)
         ctk.CTkLabel(reasons_frame, text="").pack(pady=4)
 
+        top_video = analysis.videos[0] if analysis.videos else None
+        if top_video and top_video.comment_insights.has_data:
+            self._render_comment_insights(side, top_video)
+
         list_frame = ctk.CTkScrollableFrame(side, fg_color="#1f1f1f", corner_radius=10,
                                             label_text="Top 10 vídeos (por viralidade)")
         list_frame.pack(fill="both", expand=True)
+
+        sentiment_dots = {
+            "positivo": ("●", "#6bcf7f"),
+            "negativo": ("●", "#ff6b6b"),
+            "misto": ("●", "#ffa500"),
+            "neutro": ("○", "gray60"),
+        }
 
         for a in analysis.videos:
             item = ctk.CTkFrame(list_frame, fg_color="#242424", corner_radius=6)
@@ -278,6 +297,14 @@ class MainScreen(ctk.CTkFrame):
                 font=ctk.CTkFont(size=13, weight="bold"),
                 width=30,
             ).pack(side="left")
+
+            if a.comment_insights.has_data:
+                dot, dot_color = sentiment_dots.get(a.comment_insights.sentiment, ("○", "gray60"))
+                ctk.CTkLabel(
+                    top_row, text=dot, text_color=dot_color,
+                    font=ctk.CTkFont(size=14), width=16,
+                ).pack(side="left")
+
             ctk.CTkLabel(
                 top_row, text=a.video.title[:60] + ("..." if len(a.video.title) > 60 else ""),
                 font=ctk.CTkFont(size=11),
@@ -289,6 +316,95 @@ class MainScreen(ctk.CTkFrame):
                 item, text=info, text_color="gray60",
                 font=ctk.CTkFont(size=10),
             ).pack(anchor="w", padx=42, pady=(0, 6))
+
+
+    def _render_comment_insights(self, parent, top_video):
+        insights = top_video.comment_insights
+
+        sentiment_colors = {
+            "positivo": "#6bcf7f",
+            "negativo": "#ff6b6b",
+            "misto": "#ffa500",
+            "neutro": "gray70",
+        }
+        sentiment_color = sentiment_colors.get(insights.sentiment, "gray70")
+
+        frame = ctk.CTkScrollableFrame(
+            parent, fg_color="#1f1f1f", corner_radius=10,
+            label_text=f"O que o público está dizendo (top vídeo)",
+            height=280,
+        )
+        frame.pack(fill="x", pady=(0, 10))
+
+        header_row = ctk.CTkFrame(frame, fg_color="transparent")
+        header_row.pack(fill="x", padx=8, pady=(4, 8))
+        ctk.CTkLabel(
+            header_row,
+            text=f"Sentimento: {insights.sentiment.upper()}",
+            text_color=sentiment_color,
+            font=ctk.CTkFont(size=12, weight="bold"),
+        ).pack(side="left")
+        ctk.CTkLabel(
+            header_row,
+            text=f"  ({insights.total_analyzed} comentários analisados)",
+            text_color="gray60",
+            font=ctk.CTkFont(size=10),
+        ).pack(side="left")
+
+        if insights.top_keywords:
+            ctk.CTkLabel(
+                frame, text="Temas mais mencionados:",
+                font=ctk.CTkFont(size=11, weight="bold"),
+                text_color="gray80",
+            ).pack(anchor="w", padx=8, pady=(2, 4))
+            chip_row = ctk.CTkFrame(frame, fg_color="transparent")
+            chip_row.pack(fill="x", padx=8)
+            for word, count in insights.top_keywords[:8]:
+                ctk.CTkLabel(
+                    chip_row, text=f"  {word} · {count}  ",
+                    fg_color="#2b2b2b", corner_radius=8,
+                    font=ctk.CTkFont(size=10),
+                    text_color="#e8e8e8",
+                ).pack(side="left", padx=2, pady=2)
+
+        if insights.top_comments:
+            ctk.CTkLabel(
+                frame, text="Comentários com mais curtidas:",
+                font=ctk.CTkFont(size=11, weight="bold"),
+                text_color="gray80",
+            ).pack(anchor="w", padx=8, pady=(10, 4))
+            for c in insights.top_comments[:3]:
+                item = ctk.CTkFrame(frame, fg_color="#242424", corner_radius=6)
+                item.pack(fill="x", padx=6, pady=2)
+                meta = f"❤ {_fmt_int(c.likes)}  •  @{c.author[:25]}"
+                ctk.CTkLabel(
+                    item, text=meta,
+                    text_color="#e94560",
+                    font=ctk.CTkFont(size=10, weight="bold"),
+                ).pack(anchor="w", padx=8, pady=(4, 0))
+                text = c.text.strip().replace("\n", " ")
+                if len(text) > 200:
+                    text = text[:197] + "..."
+                ctk.CTkLabel(
+                    item, text=text,
+                    wraplength=320, justify="left",
+                    font=ctk.CTkFont(size=10),
+                    text_color="gray85",
+                ).pack(anchor="w", padx=8, pady=(0, 6))
+
+        if insights.requests:
+            ctk.CTkLabel(
+                frame, text="Pedidos/sugestões do público:",
+                font=ctk.CTkFont(size=11, weight="bold"),
+                text_color="gray80",
+            ).pack(anchor="w", padx=8, pady=(10, 4))
+            for req in insights.requests[:3]:
+                ctk.CTkLabel(
+                    frame, text=f"→  {req}",
+                    wraplength=340, justify="left",
+                    font=ctk.CTkFont(size=10),
+                    text_color="#ffd93d",
+                ).pack(anchor="w", padx=12, pady=1)
 
 
 def _fmt_int(n: int) -> str:
