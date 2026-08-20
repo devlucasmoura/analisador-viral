@@ -4,6 +4,7 @@ config.json
 api_key.txt
 credentials.json
 secrets/
+src/_secret.py
 
 # Python
 __pycache__/
